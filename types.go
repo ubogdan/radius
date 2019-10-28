@@ -11,11 +11,6 @@ type Type int
 // EapType is the EAP attribute type.
 type EapType uint8
 
-// ResponseWriter godoc
-type ResponseWriter interface {
-	Write(packet *Packet) error
-}
-
 // SecretStore supplies RADIUS servers with the secret that should be used for
 // authorizing and decrypting packets.
 //

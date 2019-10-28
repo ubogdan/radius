@@ -1,7 +1,7 @@
 package radius
 
 import (
-	"fmt"
+	"context"
 	"net"
 	"sync"
 	"time"
@@ -12,24 +12,57 @@ const ACCOUNTING_PORT = 1813
 
 type Server struct {
 	addr      string
-	secret    string
-	service   Service
 	ch        chan struct{}
 	waitGroup *sync.WaitGroup
+	Handler
 	SecretSource
 }
 
-type Service interface {
-	RadiusHandle(request *Packet) *Packet
+// Request is an incoming RADIUS request that is being handled by the server.
+type Request struct {
+	// LocalAddr is the local address on which the incoming RADIUS request
+	// was received.
+	LocalAddr net.Addr
+	// RemoteAddr is the address from which the incoming RADIUS request
+	// was sent.
+	RemoteAddr net.Addr
+
+	// Packet is the RADIUS packet sent in the request.
+	*Packet
+
+	ctx context.Context
 }
-type radiusEncoder interface {
-	Encode() ([]byte, error)
+
+// ResponseWriter godoc
+type ResponseWriter interface {
+	Write(packet *Packet) error
+}
+
+type Handler interface {
+	ServeRADIUS(ResponseWriter, *Request)
+}
+
+type responseWriter struct {
+	// listener that received the packet
+	conn net.PacketConn
+	addr net.Addr
+}
+
+func (r *responseWriter) Write(packet *Packet) error {
+	encoded, err := packet.Encode()
+	if err != nil {
+		return err
+	}
+	if _, err := r.conn.WriteTo(encoded, r.addr); err != nil {
+		return err
+	}
+	return nil
 }
 
 // NewServer return a new Server given a addr, secret, and service
-func NewServer(addr string, secret []byte, service Service) *Server {
+func NewServer(addr string, secret []byte, handler Handler) *Server {
 	s := &Server{addr: addr,
-		service:      service,
+		Handler:      handler,
 		ch:           make(chan struct{}),
 		waitGroup:    &sync.WaitGroup{},
 		SecretSource: func(net.Addr) ([]byte, error) { return secret, nil },
@@ -66,34 +99,38 @@ func (s *Server) ListenAndServe() error {
 		}
 
 		s.waitGroup.Add(1)
-		go func(p []byte, addr net.Addr) {
+		go func(p []byte, remoteAddr net.Addr) {
 			defer s.waitGroup.Done()
 
-			secret, err := s.SecretSource(addr)
+			secret, err := s.SecretSource(remoteAddr)
 			if err != nil {
 				return
 			}
-			pac, err := Parse(p, secret)
-			if err != nil {
-				fmt.Println("[pac.Decode]", err)
-				return
-			}
-			pac.ClientAddr = addr.String()
 
-			err = s.Send(conn, addr, s.service.RadiusHandle(pac))
-			if err != nil {
-				fmt.Println("[npac.Send]", err)
+			if len(secret) == 0 {
+				return
 			}
+
+			packet, err := Parse(p, secret)
+			if err != nil {
+				return
+			}
+
+			response := responseWriter{
+				conn: conn,
+				addr: remoteAddr,
+			}
+
+			request := Request{
+				LocalAddr:  conn.LocalAddr(),
+				RemoteAddr: remoteAddr,
+				Packet:     packet,
+				//ctx:        s.ctx,
+			}
+
+			s.Handler.ServeRADIUS(&response, &request)
 		}(b[:n], addr)
 	}
-}
-func (s *Server) Send(c net.PacketConn, addr net.Addr, p radiusEncoder) error {
-	buf, err := p.Encode()
-	if err != nil {
-		return err
-	}
-	_, err = c.WriteTo(buf, addr)
-	return err
 }
 
 // Stop will stop the server
