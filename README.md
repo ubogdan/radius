@@ -58,9 +58,23 @@ func main() {
 
 	srv := radius.NewServer(":1812", []byte("secret1234"), &Server{})
 
-	err := srv.ListenAndServe()
-	if err != nil {
-		log.Fatalf("%s", err)
+	signalHandler := make(chan os.Signal, 1)
+	signal.Notify(signalHandler, syscall.SIGINT, syscall.SIGTERM)
+	errHandler := make(chan error)
+	go func() {
+		fmt.Println("waiting for packets...")
+		err := srv.ListenAndServe()
+		if err != nil {
+			errHandler <- err
+		}
+	}()
+	select {
+	case <-signalHandler:
+		log.Println("Shuting down ...")
+		srv.Stop()
+	case err := <-errHandler:
+		log.Println("[ERR] %v", err.Error())
 	}
+
 }
 ```
