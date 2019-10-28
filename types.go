@@ -1,12 +1,28 @@
 package radius
 
-import "strconv"
+import (
+	"net"
+	"strconv"
+)
 
 // Type is the RADIUS attribute type.
 type Type int
 
 // EapType is the EAP attribute type.
 type EapType uint8
+
+// ResponseWriter godoc
+type ResponseWriter interface {
+	Write(packet *Packet) error
+}
+
+// SecretStore supplies RADIUS servers with the secret that should be used for
+// authorizing and decrypting packets.
+//
+// ctx is canceled if the server's Shutdown method is called.
+//
+// Returning an empty secret will discard the incoming packet.
+type SecretSource func(remoteAddr net.Addr) ([]byte, error)
 
 // TypeInvalid is a Type that can be used to represent an invalid RADIUS
 // attribute type.

@@ -1,90 +1,130 @@
 package radius
 
-import "sync"
+import (
+	"context"
+	"net"
+	"time"
+)
 
-func NewClientList(cs []Client) *ClientList {
-	cl := new(ClientList)
-	cl.SetHerd(cs)
-	return cl
+// Client is a RADIUS client that can exchange packets with a RADIUS server.
+type Client struct {
+	// Network on which to make the connection. Defaults to "udp".
+	Net string
+
+	// Dialer to use when making the outgoing connections.
+	Dialer net.Dialer
+
+	// Interval on which to resend packet (zero or negative value means no
+	// retry).
+	Retry time.Duration
+
+	// MaxPacketErrors controls how many packet parsing and validation errors
+	// the client will ignore before returning the error from Exchange.
+	//
+	// If zero, Exchange will drop all packet parsing errors.
+	MaxPacketErrors int
+
+	// InsecureSkipVerify controls whether the client should skip verifying
+	// response packets received.
+	InsecureSkipVerify bool
 }
 
-// ClientList are list of client allowed to communicate with server
-type ClientList struct {
-	herd map[string]Client
-	sync.RWMutex
+// DefaultClient is the RADIUS client used by the Exchange function.
+var DefaultClient = &Client{
+	Retry:           time.Second,
+	MaxPacketErrors: 10,
 }
 
-// Get client from list of clients based on host
-func (cls *ClientList) Get(host string) Client {
-	cls.RLock()
-	defer cls.RUnlock()
-	cl, _ := cls.herd[host]
-	return cl
+// Exchange uses DefaultClient to send the given RADIUS packet to the server at
+// address addr and waits for a response.
+func Exchange(ctx context.Context, packet *Packet, addr string) (*Packet, error) {
+	return DefaultClient.Exchange(ctx, packet, addr)
 }
 
-// Add new client or reset existing client based on host
-func (cls *ClientList) AddOrUpdate(cl Client) {
-	cls.Lock()
-	defer cls.Unlock()
-	cls.herd[cl.GetHost()] = cl
-}
-
-// Remove client based on host
-func (cls *ClientList) Remove(host string) {
-	cls.Lock()
-	defer cls.Unlock()
-	delete(cls.herd, host)
-}
-
-// SetHerd reset/initialize the herd of clients
-func (cls *ClientList) SetHerd(herd []Client) {
-	cls.Lock()
-	defer cls.Unlock()
-	if cls.herd == nil {
-		cls.herd = make(map[string]Client)
+// Exchange sends the packet to the given server and waits for a response. ctx
+// must be non-nil.
+func (c *Client) Exchange(ctx context.Context, packet *Packet, addr string) (*Packet, error) {
+	if ctx == nil {
+		panic("nil context")
 	}
-	for _, v := range herd {
-		cls.herd[v.GetHost()] = v
+
+	wire, err := packet.Encode()
+	if err != nil {
+		return nil, err
 	}
-}
 
-func (cls *ClientList) GetHerd() []Client {
-	cls.RLock()
-	defer cls.RUnlock()
-	herd := make([]Client, len(cls.herd))
-	i := 0
-	for _, v := range cls.herd {
-		herd[i] = v
-		i++
+	connNet := c.Net
+	if connNet == "" {
+		connNet = "udp"
 	}
-	return herd
-}
 
-// Client represent a client to connect to radius server
-type Client interface {
-	// GetHost get the client host
-	GetHost() string
-	// GetSecret get shared secret
-	GetSecret() string
-}
+	conn, err := c.Dialer.DialContext(ctx, connNet, addr)
+	if err != nil {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+		return nil, err
+	}
+	defer conn.Close()
 
-// NewClient return new client
-func NewClient(host, secret string) Client {
-	return &DefaultClient{host, secret}
-}
+	conn.Write(wire)
 
-// DefaultClient is default client implementation
-type DefaultClient struct {
-	Host   string
-	Secret string
-}
+	var cancel context.CancelFunc
+	ctx, cancel = context.WithCancel(ctx)
+	defer cancel()
 
-// GetSecret get shared secret
-func (cl *DefaultClient) GetSecret() string {
-	return cl.Secret
-}
+	var retryTimer <-chan time.Time
+	if c.Retry > 0 {
+		retry := time.NewTicker(c.Retry)
+		defer retry.Stop()
+		retryTimer = retry.C
+	}
 
-// GetHost get the client host
-func (cl *DefaultClient) GetHost() string {
-	return cl.Host
+	go func() {
+		defer conn.Close()
+		for {
+			select {
+			case <-retryTimer:
+				conn.Write(wire)
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	var packetErrorCount int
+
+	var incoming [MaxPacketLength]byte
+	for {
+		n, err := conn.Read(incoming[:])
+		if err != nil {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			default:
+			}
+			return nil, err
+		}
+
+		received, err := Parse(incoming[:n], packet.Secret)
+		if err != nil {
+			packetErrorCount++
+			if c.MaxPacketErrors > 0 && packetErrorCount >= c.MaxPacketErrors {
+				return nil, err
+			}
+			continue
+		}
+
+		if !c.InsecureSkipVerify && !IsAuthenticResponse(incoming[:n], wire, packet.Secret) {
+			packetErrorCount++
+			if c.MaxPacketErrors > 0 && packetErrorCount >= c.MaxPacketErrors {
+				return nil, &NonAuthenticResponseError{}
+			}
+			continue
+		}
+
+		return received, nil
+	}
 }

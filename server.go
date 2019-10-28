@@ -16,7 +16,7 @@ type Server struct {
 	service   Service
 	ch        chan struct{}
 	waitGroup *sync.WaitGroup
-	cl        *ClientList
+	SecretSource
 }
 
 type Service interface {
@@ -27,19 +27,14 @@ type radiusEncoder interface {
 }
 
 // NewServer return a new Server given a addr, secret, and service
-func NewServer(addr string, secret string, service Service) *Server {
+func NewServer(addr string, secret []byte, service Service) *Server {
 	s := &Server{addr: addr,
-		secret:    secret,
-		service:   service,
-		ch:        make(chan struct{}),
-		waitGroup: &sync.WaitGroup{},
+		service:      service,
+		ch:           make(chan struct{}),
+		waitGroup:    &sync.WaitGroup{},
+		SecretSource: func(net.Addr) ([]byte, error) { return secret, nil },
 	}
 	return s
-}
-
-// WithClientList set a list of clients that have it's own secret
-func (s *Server) WithClientList(cl *ClientList) {
-	s.cl = cl
 }
 
 // ListenAndServe listen on the UDP network address
@@ -73,20 +68,12 @@ func (s *Server) ListenAndServe() error {
 		s.waitGroup.Add(1)
 		go func(p []byte, addr net.Addr) {
 			defer s.waitGroup.Done()
-			var secret = s.secret
 
-			if s.cl != nil {
-				host, _, err := net.SplitHostPort(addr.String())
-				if err != nil {
-					fmt.Println("[pac.Host]", err)
-					return
-				}
-				if cl := s.cl.Get(host); cl != nil {
-					secret = cl.GetSecret()
-				}
+			secret, err := s.SecretSource(addr)
+			if err != nil {
+				return
 			}
-
-			pac, err := Parse(p, []byte(secret))
+			pac, err := Parse(p, secret)
 			if err != nil {
 				fmt.Println("[pac.Decode]", err)
 				return
