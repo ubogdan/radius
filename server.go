@@ -11,12 +11,15 @@ const AUTH_PORT = 1812
 const ACCOUNTING_PORT = 1813
 
 type Server struct {
-	addr      string
-	ch        chan struct{}
-	waitGroup *sync.WaitGroup
-	Handler
-	SecretSource
+	Addr         string       // TCP address to listen on, ":radius" if empty
+	Handler      Handler      // handler to invoke
+	SecretSource SecretSource // Secret source Store
+	doneChan     chan struct{}
+	mu           sync.Mutex
+	waitGroup    *sync.WaitGroup
 }
+
+//var DefaultServe = func() {}
 
 // Request is an incoming RADIUS request that is being handled by the server.
 type Request struct {
@@ -33,7 +36,7 @@ type Request struct {
 	ctx context.Context
 }
 
-// ResponseWriter godoc
+// ResponseWriter is used by RADIUS servers when replying to a RADIUS request.
 type ResponseWriter interface {
 	Write(packet *Packet) error
 }
@@ -61,18 +64,25 @@ func (r *responseWriter) Write(packet *Packet) error {
 
 // NewServer return a new Server given a addr, secret, and service
 func NewServer(addr string, secret []byte, handler Handler) *Server {
-	s := &Server{addr: addr,
+	s := &Server{
+		Addr:         addr,
 		Handler:      handler,
-		ch:           make(chan struct{}),
-		waitGroup:    &sync.WaitGroup{},
 		SecretSource: func(net.Addr) ([]byte, error) { return secret, nil },
 	}
 	return s
 }
 
+// ListenAndServe listens on the UDP network address addr and then calls
+//
+// ListenAndServe always returns a non-nil error.
+func ListenAndServe(addr string, handler Handler, secretSource SecretSource) error {
+	server := &Server{Addr: addr, Handler: handler, SecretSource: secretSource}
+	return server.ListenAndServe()
+}
+
 // ListenAndServe listen on the UDP network address
 func (s *Server) ListenAndServe() error {
-	addr, err := net.ResolveUDPAddr("udp", s.addr)
+	addr, err := net.ResolveUDPAddr("udp", s.Addr)
 	if err != nil {
 		return err
 	}
@@ -82,12 +92,14 @@ func (s *Server) ListenAndServe() error {
 	}
 	defer conn.Close()
 
+	s.waitGroup = &sync.WaitGroup{}
 	for {
 		select {
-		case <-s.ch:
+		case <-s.getDoneChan():
 			return nil
 		default:
 		}
+
 		conn.SetDeadline(time.Now().Add(2 * time.Second))
 		b := make([]byte, 4096)
 		n, addr, err := conn.ReadFrom(b)
@@ -133,8 +145,51 @@ func (s *Server) ListenAndServe() error {
 	}
 }
 
-// Stop will stop the server
-func (s *Server) Stop() {
-	close(s.ch)
-	s.waitGroup.Wait()
+func (s *Server) getDoneChan() <-chan struct{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.getDoneChanLocked()
+}
+
+func (s *Server) getDoneChanLocked() chan struct{} {
+	if s.doneChan == nil {
+		s.doneChan = make(chan struct{})
+	}
+	return s.doneChan
+}
+
+func (s *Server) closeDoneChanLocked() {
+	ch := s.getDoneChanLocked()
+	select {
+	case <-ch:
+		// Already closed. Don't close again.
+	default:
+		// Safe to close here. We're the only closer, guarded
+		// by s.mu.
+		close(ch)
+	}
+}
+
+var shutdownPollInterval = 500 * time.Millisecond
+
+// Shutdown godoc
+func (s *Server) Shutdown(ctx context.Context) error {
+	s.mu.Lock()
+	s.closeDoneChanLocked()
+	s.mu.Unlock()
+
+	waitChan := make(chan struct{}, 1)
+	go func() {
+		s.waitGroup.Wait()
+		waitChan <- struct{}{}
+	}()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-waitChan:
+			return nil
+		}
+	}
 }

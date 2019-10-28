@@ -7,6 +7,7 @@ package main
 
 import (
 	"log"
+	"context"
 
 	"github.com/ubogdan/radius"
 )
@@ -71,7 +72,7 @@ func main() {
 	select {
 	case <-signalHandler:
 		log.Println("Shuting down ...")
-		srv.Stop()
+		srv.srv.Shutdown(context.Background())
 	case err := <-errHandler:
 		log.Println("[ERR] %v", err.Error())
 	}
