@@ -1,7 +1,8 @@
 repo_name: ubogdan/radius
-report_id: 2c789a4bcc1e16ac194ebdd43481529f
+report_id: 57f14da2a97605c7c426c37b5654be64
+version: 0.1
 repo_type: Public
-timestamp: '2023-12-14T09:58:00+00:00'
+timestamp: '2024-01-04T15:14:23+00:00'
 requested_by: ubogdan
 provider: github
 branch: master
@@ -17,6 +18,7 @@ tools:
   category: Languages & Frameworks
   sub_category: Languages
   image_url: https://img.stackshare.io/service/1005/O6AczwfV_400x400.png
+  detection_source_url: https://github.com/ubogdan/radius
   detection_source: Repo Metadata
 - name: Git
   description: Fast, scalable, distributed revision control system
@@ -26,4 +28,5 @@ tools:
   category: Build, Test, Deploy
   sub_category: Version Control System
   image_url: https://img.stackshare.io/service/1046/git.png
+  detection_source_url: https://github.com/ubogdan/radius
   detection_source: Repo Metadata
